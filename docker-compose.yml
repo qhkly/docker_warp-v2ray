@@ -1,0 +1,51 @@
+services:
+  warp-v2ray:
+    # 想直接用已发布的镜像（amd64 / arm64）就把下面 build 那行注释掉，
+    # docker compose 会改为从 Docker Hub 拉取。
+    build: .
+    image: land007/warp-v2ray:latest
+    container_name: warp-v2ray
+    restart: unless-stopped
+
+    # TUN 模式必需：WARP 要建 CloudflareWARP 接口并改路由表，
+    # 策略路由脚本也要写 ip rule / iptables mangle。
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+
+    volumes:
+      # WARP 注册凭据。务必保留——丢了就要重新注册，
+      # 反复注册会被 Cloudflare 按 IP 限流。
+      - ./data:/var/lib/cloudflare-warp
+      # 现有 v2ray 配置。patch 模式下 inbounds 原样保留，客户端零改动。
+      - ./config:/config:ro
+
+    ports:
+      # 安全提示：9000 仅供内网使用。
+      # 若本机有公网 IP，建议改成绑定内网地址，例如 "192.168.1.10:9000:9000"，
+      # 或用宿主机防火墙限制源 IP。当前 VMess 是裸 TCP 无 TLS，不适合直接对公网开放。
+      - "9000:9000"
+
+    environment:
+      # patch  = 挂载现有 config.json，只加固出站与路由（默认）
+      # generate = 从 VMESS_UUID 等环境变量生成
+      CONFIG_MODE: patch
+
+      # MASQUE 是本方案在国内可用的根本原因，改成 WireGuard 大概率不通
+      WARP_PROTOCOL: MASQUE
+
+      # warp = TUN 全隧道，支持 UDP
+      # proxy = 更简单但完全不支持 UDP
+      WARP_MODE: warp
+
+      # WARP+ 授权码，可选
+      WARP_LICENSE: ""
+
+      # 健康检查探测的端口，需与 inbounds 里的监听端口一致
+      XRAY_PORT: "9000"
+
+      # warp-svc 日志级别。默认 warn；排障时改 info 或 debug
+      WARP_LOG_LEVEL: warn
