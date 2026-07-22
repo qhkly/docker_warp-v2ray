@@ -86,6 +86,13 @@ esac
 #         插到 vmess-in -> direct 后面等于没写
 #   3. dns 段若缺失则补上（容器 resolv.conf 由 Docker 管，显式配置避免解析行为漂移）
 #
+# domainStrategy 默认 IPIfNonMatch 而不是 AsIs：
+# 上面第 2 条私网封锁是按**目标 IP** 匹配的，而 AsIs 下 Xray 不会为路由决策
+# 解析域名，于是用域名访问内网（http://nas.local）就绕过了封锁。
+# IPIfNonMatch 会在域名规则未命中时解析成 IP 再匹配一次，封锁才真正生效。
+# 代价是路由决策多一次 DNS 查询。
+# 注意这里用的是 jq 的 `//`：配置里已显式写了 domainStrategy 就以其为准。
+#
 # 出站保持现有的 freedom/direct：TUN 模式下内核已把流量送进 WARP 隧道，
 # 不需要（也不应该）再串 SOCKS 到 127.0.0.1:40000（那是 proxy 模式的做法）。
 #
@@ -98,7 +105,7 @@ jq --argjson blockrule "$BLOCK_RULE" '
         else $o + [{"protocol":"blackhole","settings":{},"tag":"block"}]
         end
     )
-  | .routing = ((.routing // {}) | .domainStrategy = (.domainStrategy // "AsIs"))
+  | .routing = ((.routing // {}) | .domainStrategy = (.domainStrategy // "IPIfNonMatch"))
   | .routing.rules = ([$blockrule] + ((.routing.rules // []) | map(select(. != $blockrule))))
   | .dns = (.dns // {"servers":["1.1.1.1","8.8.8.8"],"queryStrategy":"UseIP"})
 ' "$SRC_CONFIG" > "$XRAY_CONFIG" || die "Xray 配置生成失败"

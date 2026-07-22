@@ -28,7 +28,9 @@
 │      └── MASQUE / HTTP3 ─────────> Cloudflare ──> 互联网  │
 │                  ▲                                        │
 │  xray            │ 出站 freedom，由内核路由进隧道         │
-│      └── VMess inbound :9000                              │
+│      ├── VMess  :9000   （需 UUID）                       │
+│      ├── SOCKS5 :9001   （无认证，含 UDP）                │
+│      └── HTTP   :9002   （无认证）                        │
 │           ▲                                               │
 │  CONNMARK 策略路由：从物理网卡进来的连接，回包走原网关    │
 │           │        （否则 9000 会「开着但连不上」）        │
@@ -109,10 +111,40 @@ sudo apt remove cloudflare-warp
 | 4 | 容器内状态 | `docker exec warp-v2ray warp-cli status` → `Connected` |
 | 5 | 协议确实是 MASQUE | `docker exec warp-v2ray warp-cli tunnel protocol get` |
 | 6 | 入站零改动 | `diff <(jq -S .inbounds config/config.json) <(docker exec warp-v2ray jq -S .inbounds /etc/xray/config.json)` 无输出 |
-| 7 | 私网封锁生效 | 经代理访问 `http://172.17.0.1`、`http://192.168.1.1` **应全部被拒** |
+| 7 | 私网封锁生效 | 经代理访问内网地址**应全部被拒**，IP 与域名两种形式都要试（见下方说明）。测试目标要选**确有服务监听**的地址，否则「被拦」和「没服务」分不出来 |
+| 7b | SOCKS5 / HTTP 可用 | `curl -x socks5h://<IP>:9001 https://www.cloudflare.com/cdn-cgi/trace` 与 `-x http://<IP>:9002` 均须 `warp=on` |
 | 8 | 注册持久化 | `docker compose restart` 后日志无 `registration new` |
 | 9 | 自愈 | `docker exec warp-v2ray pkill warp-svc` 后，检查 2 应自行恢复 |
 | 10 | 健康检查 | `docker compose ps` 显示 `healthy` |
+
+---
+
+## 三个入站的差异
+
+| 端口 | 协议 | 认证 | UDP | 适用 |
+|---|---|---|---|---|
+| 9000 | VMess | **需要 UUID** | — | v2rayN / v2rayNG 等客户端 |
+| 9001 | SOCKS5 | **无** | ✅ | 浏览器、`curl -x socks5h://`、各类 CLI |
+| 9002 | HTTP | **无** | ✗ | `HTTP_PROXY` 环境变量、只认 HTTP 代理的工具 |
+
+> ⚠️ **9001 / 9002 是无认证的开放代理**：任何能连到端口的人都能借它出网，流量计入本机的 WARP 账号。
+> 仅当本机**没有公网 IP** 且局域网可信时才可以按默认配置暴露。
+> 本机有公网 IP 的话，把 `docker-compose.yml` 里的端口映射改成绑内网地址（`"192.168.1.10:9001:9001"`）或只给本机用（`"127.0.0.1:9001:9001"`），也可以用宿主机防火墙限制源 IP。
+
+SOCKS5 的 `"udp": true` 是有意义的——容器跑 WARP **TUN 模式**，UDP 可用（proxy 模式则完全不支持 UDP）。HTTP 代理协议本身只支持 TCP。
+
+### 为什么 `domainStrategy` 必须是 `IPIfNonMatch`
+
+私网封锁规则按**目标 IP** 匹配。`AsIs` 下 Xray 不会为路由决策解析域名，于是**用域名访问内网就绕过了封锁**。VMess 时代影响有限（需要 UUID），开放 SOCKS/HTTP 之后局域网内任何人都能利用。
+
+这不是理论推测，实测数据（目标为内网 nginx，200 = 未拦截）：
+
+| domainStrategy | IP 形式 | 域名形式 |
+|---|---|---|
+| `AsIs` | 000 / 503（拦住） | **200（绕过！）** |
+| `IPIfNonMatch` | 000（拦住） | 000 / 503（拦住） |
+
+代价是路由决策多一次 DNS 查询。`config.json` 里已显式声明该值，因此**改它不需要重建镜像**——`entrypoint.sh` 用 jq 的 `//` 注入默认值，配置里写了就以配置为准。
 
 ---
 
@@ -131,7 +163,8 @@ sudo apt remove cloudflare-warp
 | 注册 / MASQUE 连接 | 成功，Free 账号 |
 | 经 VMess:9000 出网 | `warp=on`，出口为 WARP IPv6，与直连出口不同 |
 | UDP 往返 | 向 `1.1.1.1:53` 发 DNS 查询收到完整应答（2 条 A 记录） |
-| 私网封锁 | 经代理连内网中**确有服务监听**的地址，被拒 |
+| 私网封锁 | 经代理连内网中**确有服务监听**的地址，IP 与域名两种形式均被拒 |
+| SOCKS5 :9001 / HTTP :9002 | 均 `warp=on`，出口与宿主机直连不同 |
 | 入站零改动 | `diff .inbounds` 无输出 |
 | 注册持久化 | 重启后日志显示「已存在注册信息，跳过注册」，Account ID 不变 |
 | 自愈 | `pkill warp-svc` 后 supervisord 拉起，出网自动恢复 |

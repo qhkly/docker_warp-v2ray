@@ -21,6 +21,23 @@
         "security": "none"
       },
       "tag": "vmess-in"
+    },
+    {
+      "listen": "0.0.0.0",
+      "port": 9001,
+      "protocol": "socks",
+      "settings": {
+        "auth": "noauth",
+        "udp": true
+      },
+      "tag": "socks-in"
+    },
+    {
+      "listen": "0.0.0.0",
+      "port": 9002,
+      "protocol": "http",
+      "settings": {},
+      "tag": "http-in"
     }
   ],
   "outbounds": [
@@ -31,11 +48,14 @@
     }
   ],
   "routing": {
+    "domainStrategy": "IPIfNonMatch",
     "rules": [
       {
         "type": "field",
         "inboundTag": [
-          "vmess-in"
+          "vmess-in",
+          "socks-in",
+          "http-in"
         ],
         "outboundTag": "direct"
       }
