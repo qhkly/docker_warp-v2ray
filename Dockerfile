@@ -10,6 +10,14 @@ FROM ubuntu:22.04 AS builder
 ARG XRAY_VERSION=v26.3.27
 ARG TARGETARCH
 
+# apt 重试与超时。
+# 默认 apt 不重试、也没有连接超时，网络一抖就会无限干等——实测在多架构
+# 交叉构建时卡死过一次（下到 578MB 后网络 I/O 完全冻结）。
+# 这几行让它失败快、自动重试，构建可预期得多。
+RUN set -eux; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::ftp::Timeout "30";\n' \
+      > /etc/apt/apt.conf.d/99-retries
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl unzip \
  && rm -rf /var/lib/apt/lists/*
@@ -34,6 +42,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 # warp-svc 的日志级别（Rust tracing）。默认 warn，避免 DEBUG 刷屏淹没
 # 我们自己 agent 的日志；排障时可在 compose 里覆盖为 info / debug。
 ENV WARP_LOG_LEVEL=warn
+
+# apt 重试与超时。
+# 默认 apt 不重试、也没有连接超时，网络一抖就会无限干等——实测在多架构
+# 交叉构建时卡死过一次（下到 578MB 后网络 I/O 完全冻结）。
+# 这几行让它失败快、自动重试，构建可预期得多。
+RUN set -eux; \
+    printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::ftp::Timeout "30";\n' \
+      > /etc/apt/apt.conf.d/99-retries
 
 # cloudflare-warp 来自 Cloudflare 官方 apt 源。
 # 已实测确认该源提供 amd64 与 arm64 两个架构（dists/jammy/Release -> Architectures: amd64 arm64）。
