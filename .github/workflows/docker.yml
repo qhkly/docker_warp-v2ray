@@ -1,0 +1,123 @@
+name: Build and push image
+
+# 需要在仓库 Settings → Secrets and variables → Actions 里配置：
+#   DOCKERHUB_USERNAME  Docker Hub 用户名（land007）
+#   DOCKERHUB_TOKEN     Docker Hub Access Token（Read & Write 权限即可，别用账号密码）
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    # 只改文档不触发构建，省 CI 时间
+    paths-ignore:
+      - "**.md"
+      - ".gitignore"
+  workflow_dispatch:
+
+env:
+  IMAGE: land007/warp-v2ray
+
+jobs:
+  # 每个架构在**原生 runner** 上构建，不走 QEMU 模拟。
+  #
+  # 本项目的 runtime 阶段要 apt 安装约 700MB（cloudflare-warp 带一堆 GUI 硬依赖），
+  # 在模拟环境下极慢——本地实测交叉构建 amd64 时，光跑到第一条 apt 就花了 18 分钟。
+  # 公开仓库可以免费用 GitHub 的 arm64 runner，因此按架构分发到原生机器上跑。
+  #
+  # 各自只按 digest 推送（push-by-digest），不打标签；标签由后面的 merge 作业
+  # 统一合成 manifest list，这样两个架构才会归到同一个 tag 下。
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Normalise platform name for artifact naming
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # 按架构分别缓存，两个架构的层不会互相污染
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # 把两个架构的 digest 合成一个多架构标签。
+  merge:
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.IMAGE }}@sha256:%s ' *)
+
+      - name: Verify both architectures are present
+        run: |
+          out=$(docker buildx imagetools inspect "${{ env.IMAGE }}:${{ steps.meta.outputs.version }}")
+          echo "$out"
+          # 光看推送成功不够——manifest 里少一个架构照样"成功"，
+          # 用户在那个平台上 pull 才会发现问题，所以这里硬校验。
+          echo "$out" | grep -q "linux/amd64" || { echo "::error::manifest 缺少 linux/amd64"; exit 1; }
+          echo "$out" | grep -q "linux/arm64" || { echo "::error::manifest 缺少 linux/arm64"; exit 1; }

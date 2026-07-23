@@ -9,10 +9,10 @@ target/
 # ---------------------------------------------------------------
 
 # WARP 注册凭据，含设备私钥与账号信息
-data/
+warp-v2ray/data/
 
 # 运行时 v2ray 配置，含 VMess UUID
-config/
+warp-v2ray/config/
 
 # 环境变量。.env.example 是模板，必须保留在版本库里
 .env

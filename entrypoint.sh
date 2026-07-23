@@ -8,8 +8,9 @@
 #
 set -euo pipefail
 
-log() { echo "[entrypoint] $*"; }
-die() { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
+log()  { echo "[entrypoint] $*"; }
+warn() { echo "[entrypoint] WARN: $*" >&2; }
+die()  { echo "[entrypoint] FATAL: $*" >&2; exit 1; }
 
 ORIG_ROUTE_ENV=/run/warp-orig-route.env
 XRAY_CONFIG=/etc/xray/config.json
@@ -60,19 +61,79 @@ PRIVATE_CIDRS='["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","127.0.0.0/8","169
 BLOCK_RULE="$(jq -nc --argjson cidrs "$PRIVATE_CIDRS" \
   '{"type":"field","ip":$cidrs,"outboundTag":"block"}')"
 
+# 首次启动自动生成配置。
+#
+# 把生成的配置**写回挂载目录**而不是容器内的临时文件，这样 UUID 跨重启稳定，
+# 用户也能直接编辑那份文件。要求 /config 可写（compose 里不要挂成 :ro）。
+#
+# 若 /config 只读则不视为错误：退回到容器内临时文件，功能照常，
+# 只是每次重启 UUID 会变——此时会明确警告。
+bootstrap_config() {
+  local dst="$1" uuid port
+  uuid="${VMESS_UUID:-$(xray uuid)}"
+  port="${XRAY_PORT:-9000}"
+
+  local tmp=/tmp/generated.json
+  jq --arg uuid "$uuid" --argjson port "$port" \
+    '.inbounds[0].port = $port | .inbounds[0].settings.clients[0].id = $uuid' \
+    /opt/config.example.json > "$tmp" || die "生成配置失败"
+
+  if cp "$tmp" "$dst" 2>/dev/null; then
+    SRC_CONFIG="$dst"
+    log "已生成默认配置并写入 ${dst}"
+  else
+    SRC_CONFIG="$tmp"
+    warn "${dst} 不可写，配置只存在于容器内，**重启后 UUID 会变**。"
+    warn "请把 compose 里 /config 的挂载去掉 :ro，然后重建容器。"
+  fi
+
+  print_share_link "$uuid" "$port" "$SRC_CONFIG"
+}
+
+# 打印 vmess:// 分享链接与其它入站信息。
+# 字段与 v2rayN / v2rayNG 的 base64 JSON 格式一致，可直接导入。
+#
+# socks/http 端口从生成的配置里读，而不是另设环境变量——
+# 端口的唯一事实来源是配置文件本身，两处各写一份迟早对不上。
+print_share_link() {
+  local uuid="$1" port="$2" cfg="$3" addr link socks_port http_port
+  addr="${SERVER_ADDR:-<本机IP>}"
+  socks_port="$(jq -r '[.inbounds[] | select(.protocol=="socks") | .port][0] // empty' "$cfg")"
+  http_port="$(jq -r '[.inbounds[] | select(.protocol=="http")  | .port][0] // empty' "$cfg")"
+
+  link="vmess://$(jq -nc \
+      --arg add "$addr" --arg port "$port" --arg id "$uuid" \
+      '{v:"2", ps:"warp-v2ray", add:$add, port:$port, id:$id,
+        aid:"0", scy:"auto", net:"tcp", type:"none",
+        host:"", path:"", tls:"", sni:"", alpn:""}' \
+    | base64 | tr -d '\n')"
+
+  log "────────────────────────────────────────────────"
+  log "VMess UUID : ${uuid}"
+  log "VMess 分享链接（导入 v2rayN / v2rayNG）："
+  log "  ${link}"
+  [ -n "${SERVER_ADDR:-}" ] || \
+    log "  ↑ 未设置 SERVER_ADDR，链接里的地址是占位符，导入后手动改成本机 IP"
+  [ -n "$socks_port" ] && { log ""; log "SOCKS5 : ${addr}:${socks_port}  （无认证，支持 UDP）"; }
+  [ -n "$http_port" ]  &&        log "HTTP   : ${addr}:${http_port}  （无认证）"
+  log "────────────────────────────────────────────────"
+}
+
 case "$CONFIG_MODE" in
   patch)
-    [ -r "$SRC_CONFIG" ] || die "CONFIG_MODE=patch 需要挂载现有配置到 ${SRC_CONFIG}，但该文件不存在或不可读。请把现有 v2ray 的 config.json 放进 ./config/ 目录。"
-    jq empty "$SRC_CONFIG" 2>/dev/null || die "${SRC_CONFIG} 不是合法 JSON"
-    log "patch 模式：以 ${SRC_CONFIG} 为基准，inbounds 保持原样"
+    if [ -r "$SRC_CONFIG" ]; then
+      jq empty "$SRC_CONFIG" 2>/dev/null || die "${SRC_CONFIG} 不是合法 JSON"
+      log "patch 模式：以 ${SRC_CONFIG} 为基准，inbounds 保持原样"
+    else
+      # 首次部署：没有现成配置就自动生成一份，而不是直接退出。
+      log "未找到 ${SRC_CONFIG}，按首次部署处理，自动生成默认配置 ..."
+      bootstrap_config "$SRC_CONFIG"
+    fi
     ;;
   generate)
-    [ -n "${VMESS_UUID:-}" ] || die "CONFIG_MODE=generate 需要设置 VMESS_UUID"
-    SRC_CONFIG=/tmp/generated.json
-    jq --arg uuid "$VMESS_UUID" --argjson port "${XRAY_PORT:-9000}" \
-      '.inbounds[0].port = $port | .inbounds[0].settings.clients[0].id = $uuid' \
-      /opt/config.example.json > "$SRC_CONFIG"
-    log "generate 模式：已从环境变量生成配置"
+    # 显式要求生成。与 patch 的区别仅在于：即使已有配置也会覆盖重写。
+    log "generate 模式：生成配置（会覆盖已有文件）"
+    bootstrap_config "$SRC_CONFIG"
     ;;
   *)
     die "未知的 CONFIG_MODE: ${CONFIG_MODE}（可选 patch / generate）"

@@ -19,9 +19,11 @@ services:
     volumes:
       # WARP 注册凭据。务必保留——丢了就要重新注册，
       # 反复注册会被 Cloudflare 按 IP 限流。
-      - ./data:/var/lib/cloudflare-warp
-      # 现有 v2ray 配置。patch 模式下 inbounds 原样保留，客户端零改动。
-      - ./config:/config:ro
+      - ./warp-v2ray/data:/var/lib/cloudflare-warp
+      # v2ray 配置。已有配置时 inbounds 原样保留，客户端零改动；
+      # 目录为空时容器会自动生成一份并写回这里（因此不能挂成 :ro），
+      # 生成的 UUID 与分享链接见启动日志。
+      - ./warp-v2ray/config:/config
 
     ports:
       # VMess，需要 UUID 才能使用。裸 TCP 无 TLS，不适合直接对公网开放。
