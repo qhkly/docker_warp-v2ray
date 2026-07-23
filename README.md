@@ -278,16 +278,26 @@ docker exec -it warp-v2ray iptables -t mangle -L -n      # CONNMARK 规则
 
 ## 自动构建（GitHub Actions）
 
-`.github/workflows/docker.yml` 在推送到 `main`、打 `v*` 标签或手动触发时，自动构建并推送多架构镜像到 Docker Hub。
+`.github/workflows/docker.yml` **只在打 `v*` 标签时**（或手动触发）构建并推送多架构镜像到 Docker Hub。日常往 `main` 推代码不会触发——镜像版本由 tag 显式决定，避免 `latest` 被每次提交悄悄改写。
 
 **为什么用矩阵而不是单机 QEMU**：本项目 runtime 阶段要 apt 装约 700MB（`cloudflare-warp` 带一堆 GUI 硬依赖），模拟环境下极慢——本地实测交叉构建 amd64 时，光跑到第一条 apt 就花了 18 分钟。本仓库是公开的，可以免费用 GitHub 的原生 arm64 runner，因此两个架构各自跑在原生机器上，最后再合并 manifest。
 
 标签规则：
 
-| 触发 | 产生的标签 |
+| 触发 | 产生的镜像标签 |
 |---|---|
-| 推送到 `main` | `latest`、`sha-<短哈希>` |
-| 打标签 `v1.2.3` | `1.2.3`、`1.2`、`sha-<短哈希>` |
+| `git tag v1.2.3 && git push origin v1.2.3` | `1.2.3`、`1.2`、`latest` |
+| 手动触发（非 tag） | `dev` |
+| 推送到 `main` | **不触发** |
+
+发布一个新版本：
+
+```bash
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+`latest` 会跟着最新的 tag 走。这是有意的——只在 tag 时构建的话，`latest` 若不更新就会永远停在第一次手工推的版本上，比不存在更容易误导人。不想要可以删掉 workflow 里 `flavor:` 那两行。
 
 ### 首次使用需要配置 Secrets
 
